@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>QRスキャン → 自動アクセス</title>
+  <meta name="description" content="アクセスするとカメラが立ち上がり、QRコードを読み込むと自動で該当URLへ遷移するワンファイルHTML" />
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- jsQR for QR decoding -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { background: radial-gradient(1000px 600px at 15% 10%, rgba(99,102,241,.25), transparent 60%),
+                         radial-gradient(800px 500px at 90% 20%, rgba(16,185,129,.22), transparent 60%),
+                         linear-gradient(120deg, #0f172a, #0b1220); }
+    .glass { backdrop-filter: blur(16px) saturate(120%); background-color: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); }
+    #video { border-radius: 1.25rem; }
+    .scan-frame { box-shadow: 0 0 0 9999px rgba(0,0,0,.35) inset; border: 2px solid rgba(255,255,255,.7); border-radius: 1rem; }
+    .safe { padding-bottom: env(safe-area-inset-bottom); }
+  </style>
+</head>
+<body class="text-white min-h-screen">
+  <main class="px-4 pt-6 pb-10 md:px-8 safe">
+    <div class="max-w-xl mx-auto">
+      <header class="mb-4">
+        <h1 class="text-2xl md:text-3xl font-bold tracking-tight">QRスキャン → 自動アクセス</h1>
+        <p class="text-sm opacity-80 mt-1">ページを開くとカメラが起動します。QRにURLが含まれていれば自動でそのページへ移動します。</p>
+      </header>
+
+      <section class="glass rounded-2xl p-4 md:p-5">
+        <div class="relative">
+          <video id="video" class="w-full aspect-square object-cover"></video>
+          <div class="absolute inset-6 scan-frame pointer-events-none"></div>
+          <div class="absolute left-3 bottom-3 right-3 flex gap-2">
+            <button id="btnStart" class="flex-1 bg-white/15 hover:bg-white/25 rounded-xl py-2 text-sm hidden">カメラ開始</button>
+            <button id="btnTorch" class="w-28 bg-white/15 hover:bg-white/25 rounded-xl py-2 text-sm hidden">ライト</button>
+            <button id="btnSwitch" class="w-28 bg-white/15 hover:bg-white/25 rounded-xl py-2 text-sm hidden">前/背面</button>
+          </div>
+        </div>
+        <p id="status" class="text-xs opacity-80 mt-3">初期化中…</p>
+        <div id="fallback" class="hidden mt-3 text-sm opacity-90">
+          <p class="mb-1">カメラ起動に失敗しました。下のボタンで再試行してください。</p>
+          <button id="btnRetry" class="bg-indigo-500 hover:bg-indigo-400 rounded-xl px-4 py-2 text-white text-sm">再試行</button>
+        </div>
+        <div id="resultBox" class="hidden mt-3 text-sm">
+          <p class="opacity-80">読み取り結果：</p>
+          <p id="plainText" class="mt-1 break-words bg-white/10 rounded-lg p-2"></p>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <button id="btnOpenAnyway" class="bg-indigo-500 hover:bg-indigo-400 text-white rounded-xl px-4 py-2 text-sm">この内容で開く</button>
+            <button id="btnCopy" class="bg-white/15 hover:bg-white/25 rounded-xl px-4 py-2 text-sm">コピー</button>
+          </div>
+        </div>
+      </section>
+
+      <footer class="text-xs opacity-70 mt-6 text-center">© 2025 QR Jump</footer>
+    </div>
+  </main>
+
+  <script>
+    const video = document.getElementById('video');
+    const statusEl = document.getElementById('status');
+    const btnStart = document.getElementById('btnStart');
+    const btnRetry = document.getElementById('btnRetry');
+    const btnTorch = document.getElementById('btnTorch');
+    const btnSwitch = document.getElementById('btnSwitch');
+    const fallback = document.getElementById('fallback');
+    const resultBox = document.getElementById('resultBox');
+    const plainText = document.getElementById('plainText');
+    const btnOpenAnyway = document.getElementById('btnOpenAnyway');
+    const btnCopy = document.getElementById('btnCopy');
+
+    let stream, track, useFacingMode = 'environment', rafId;
+
+    function looksLikeURL(s){
+      try { new URL(s); return true; } catch(e) {
+        // プロトコルなしの www. やドメインっぽい文字列
+        return /^(https?:\/\/)?([\w-]+\.)+[\w-]+(\/[\w\-._~:/?#\[\]@!$&'()*+,;=%]*)?$/i.test(s);
+      }
+    }
+
+    function normalizeURL(s){
+      try { return new URL(s).toString(); } catch(e){
+        return s.startsWith('http') ? s : 'https://' + s;
+      }
+    }
+
+    async function startCamera(){
+      stopCamera();
+      statusEl.textContent = 'カメラ起動中…';
+      try{
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: useFacingMode } });
+        video.srcObject = stream; await video.play();
+        track = stream.getVideoTracks()[0];
+        const caps = (track.getCapabilities && track.getCapabilities()) || {};
+        if (caps.torch) btnTorch.classList.remove('hidden'); else btnTorch.classList.add('hidden');
+        btnSwitch.classList.remove('hidden');
+        btnStart.classList.add('hidden');
+        fallback.classList.add('hidden');
+        statusEl.textContent = '読み取り待機中…';
+        scanLoop();
+      } catch(err){
+        console.warn(err);
+        statusEl.textContent = 'カメラを開始できませんでした。';
+        btnStart.classList.remove('hidden');
+        fallback.classList.remove('hidden');
+      }
+    }
+
+    function stopCamera(){
+      if (rafId) cancelAnimationFrame(rafId);
+      if (video.srcObject){
+        video.pause();
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+    }
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    function scanLoop(){
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh){ rafId = requestAnimationFrame(scanLoop); return; }
+      const size = Math.min(vw, vh);
+      const sx = (vw - size)/2, sy = (vh - size)/2;
+      canvas.width = size; canvas.height = size;
+      ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+      const img = ctx.getImageData(0,0,size,size);
+      const code = jsQR(img.data, size, size, { inversionAttempts: 'dontInvert' });
+      if (code && code.data){
+        handleDecoded(code.data);
+        return; // 停止
+      }
+      rafId = requestAnimationFrame(scanLoop);
+    }
+
+    function handleDecoded(data){
+      stopCamera();
+      const content = data.trim();
+      if (looksLikeURL(content)){
+        const url = normalizeURL(content);
+        statusEl.textContent = 'URLを検出しました。移動します…';
+        // 直ちに遷移
+        window.location.assign(url);
+      } else {
+        // URLでない場合は表示と操作を提供
+        plainText.textContent = content;
+        resultBox.classList.remove('hidden');
+        statusEl.textContent = 'テキストを検出しました。開く/コピーを選択できます。';
+        btnOpenAnyway.onclick = () => {
+          const maybe = prompt('開きたいURLを入力してください（検出結果を元に編集可能）', content);
+          if (maybe){ window.location.assign(normalizeURL(maybe)); }
+        };
+        btnCopy.onclick = async () => {
+          try { await navigator.clipboard.writeText(content); flashToast('コピーしました'); } catch {}
+        };
+      }
+    }
+
+    btnStart.addEventListener('click', startCamera);
+    btnRetry.addEventListener('click', startCamera);
+    btnSwitch.addEventListener('click', async()=>{
+      useFacingMode = (useFacingMode === 'environment') ? 'user' : 'environment';
+      await startCamera();
+    });
+    btnTorch.addEventListener('click', async()=>{
+      if (!track) return;
+      try {
+        const caps = track.getCapabilities && track.getCapabilities();
+        if (caps && caps.torch){
+          const current = track.getSettings && track.getSettings();
+          const next = !(current && current.torch);
+          await track.applyConstraints({ advanced: [{ torch: next }] });
+        }
+      } catch {}
+    });
+
+    // トースト
+    let toastTimer; 
+    function flashToast(msg){
+      let el = document.getElementById('toast');
+      if (!el){
+        el = document.createElement('div');
+        el.id = 'toast';
+        el.className = 'fixed left-1/2 -translate-x-1/2 bottom-6 bg-white/95 text-slate-900 rounded-full px-4 py-2 text-sm shadow-xl';
+        document.body.appendChild(el);
+      }
+      el.textContent = msg; el.style.opacity = '1';
+      clearTimeout(toastTimer); toastTimer = setTimeout(()=> el.style.opacity='0', 1500);
+    }
+
+    // ページ表示時に自動起動（ユーザー操作が必要な環境では失敗するのでボタン表示）
+    window.addEventListener('load', startCamera);
+    document.addEventListener('visibilitychange', ()=>{ if (document.visibilityState === 'visible' && !video.srcObject) startCamera(); });
+  </script>
+</body>
+</html>
